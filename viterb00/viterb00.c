@@ -101,31 +101,21 @@ static n_int BufSelector;
  * 110 -> 0xc000
  * 111 -> 0xd000	Strong 0
  */
-static e_s16 pBranchWordMapping[] = {
-    16384, 20480, 24576, 28672,
-    -24576, -20480, -16384, -12288,
-};
 
 static void FindMetrics(e_s16 EncodedWord, e_s16 *pBM)
 {
-    e_s16 esPp, esPm, esMm, esMp, esP016, esP116;
-    e_s16 esBw0, esBw1;
-
-    // isolate two bit masks for the upper and lower half of the encoded words
-    // then encode direction and magnitude like strong 1 or strong 0 
-    esBw0 = pBranchWordMapping[(EncodedWord & 0x38)>>3];
-    esBw1 = pBranchWordMapping[EncodedWord & 0x7];
-	/* fix for bug #126 arw */
+    e_s16 esPp, esPm, esMm, esMp;
+    e_s16 esBit0, esBit1;
 
     // converted to smaller, signed fixed-point values for metric computations
-	esP016 = (e_s16)( ( ((e_s32)esBw0 * -16)) >> 16);
-	esP116 = (e_s16)( ( ((e_s32)esBw1 * -16)) >> 16);
+    /* Hard-limit each 3-bit soft value to one bit (0-3 -> "1", 4-7 -> "0"). */
+    esBit0 = ((((EncodedWord & 0x38) >> 3) < 4) ? -1 : 1);
+    esBit1 = (((EncodedWord & 0x7) < 4) ? -1 : 1);
 
-
-    esPp =  esP016 + esP116;		/* Branch metric for recreated path 11 */
-    esPm =  esP016 - esP116;		/* Branch metric for recreated path 10 */
-    esMm = -esP016 - esP116;		/* Branch metric for recreated path 00 */
-    esMp = -esP016 + esP116;		/* Branch metric for recreated path 01 */
+    esPp =  esBit0 + esBit1;
+    esPm =  esBit0 - esBit1;
+    esMm = -esBit0 - esBit1;
+    esMp = -esBit0 + esBit1;
 
     /* Populate the branch metrics table */
     // one slot per ACS butterfly 
@@ -303,6 +293,9 @@ static void TraceBack(e_s16 *pOut, e_s16 *pIn)
  */
 void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr)
 {
+    // lets compute the output table 
+    // we need to use the generator polynomial, can probably follow logic similar to how this benchmark does it 
+
     n_int i;
     n_int iter;
     e_s16 *PathPtr = pSavedPath;

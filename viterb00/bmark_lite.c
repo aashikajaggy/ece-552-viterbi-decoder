@@ -32,9 +32,9 @@ int t_run_test( TCDef *tcdef,int argc, const char *argv[] );
 #elif NON_INTRUSIVE_CRC_CHECK
 
 #if   defined(DATA_1)
-#define EXPECTED_CRC	0xfe1e
+#define EXPECTED_CRC	0x79f0	/* hard-decision (Hamming) output, gett_golden_hamming.dat */
 #elif defined(DATA_2)
-#define EXPECTED_CRC	0xd48b
+#define EXPECTED_CRC	0x096a	/* hard-decision (Hamming) output, toggle_golden_hamming.dat */
 #elif defined(DATA_3)
 #define EXPECTED_CRC	0x48bf
 #elif defined(DATA_4)
@@ -89,16 +89,16 @@ TCDef the_tcdef =
 static  e_s16 input_buf[] = {
 #include "getti.dat"
 };
-static e_s16 test_buf[] = { 
-#include "gett_golden.dat"
-}; 
+static e_s16 test_buf[] = {
+#include "gett_golden_hamming.dat"
+};
 #elif defined(DATA_2)
 static  e_s16 input_buf[] = {
 #include "togglei.dat"
 };
-static e_s16 test_buf[] = { 
-#include "toggle_golden.dat"
-}; 
+static e_s16 test_buf[] = {
+#include "toggle_golden_hamming.dat"
+};
 #elif defined(DATA_3)
 static  e_s16 input_buf[] = {
 #include "onesi.dat"

@@ -32,6 +32,7 @@ DATA     ?=
 CRC      ?=
 BENCHDEF = $(if $(DATA),-DDATA_$(DATA)) $(if $(CRC),-DNON_INTRUSIVE_CRC_CHECK)
 BENCHINC = -I $(SRCDIR) -I $(SRCDIR)/datasets -I $(SRCDIR)/.. \
+           -I $(ROOT)/telecom \
            -I $(THLITE)/x86/al -I $(THLITE)/src
 BENCHSRC = $(SRCDIR)/bmark_lite.c $(SRCDIR)/viterb00.c \
            $(THLITE)/src/thlib.c $(THLITE)/src/crc.c $(THLITE)/src/heap.c \
