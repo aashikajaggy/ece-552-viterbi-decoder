@@ -1,0 +1,29 @@
+Standalone correctness test for ViterbiDecoderIS136
+===================================================
+
+Checks the decoder against all four shipped datasets (zeros, ones, gett,
+toggle) without building the full EEMBC test harness. For each dataset it
+compares every decoded word to the golden output, prints the th_lite CRC16
+(so a pass here implies a pass under the harness NON_INTRUSIVE_CRC_CHECK),
+and shows the decoded text. Exit code is 0 if all pass, 1 otherwise.
+
+Run (from the viterb00/ directory):
+
+    make -C test check
+
+or from this directory:
+
+    make check
+
+Files:
+    selftest.c    the test driver (includes ../viterb00.c and ../datasets/*)
+    makefile      builds selftest against ../viterb00.c
+    stub/thlib.h  minimal type typedefs so the harness is not needed
+
+Notes:
+  - Only gcc/cc is required; no harness, no platform AL layer.
+  - This tests correctness, not performance. Timing/throughput still comes
+    from the normal EEMBC build (make in the telecom/ directory).
+  - If you change the branch metric in viterb00.c (e.g. to Hamming distance),
+    the gett and toggle goldens will no longer match unless you regenerate
+    them; zeros and ones pass under any sane metric.
