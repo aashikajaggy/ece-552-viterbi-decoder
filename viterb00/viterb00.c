@@ -12,7 +12,7 @@
 *******************************************************************************/
 
 #include "algo.h"
-
+#include "eembc_dt.h"
 /*
  * ViterbiDecoderIS136(EncodedStreamPtr, DecodedStreamPtr)
  *
@@ -293,8 +293,6 @@ static void TraceBack(e_s16 *pOut, e_s16 *pIn)
  */
 void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr)
 {
-    // lets compute the output table 
-    // we need to use the generator polynomial, can probably follow logic similar to how this benchmark does it 
 
     n_int i;
     n_int iter;
@@ -334,3 +332,115 @@ void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr)
     TraceBack(DecodedStreamPtr, PathPtr);
 } /* ViterbiDecoderIS136 */
 
+e_u32 *computeOutputTable() {
+    static e_u32 EncReg[4] = { 0, 0, 0, 0 };
+        n_int st, u, w, bit, out0, out1, idx, sym;
+
+        for (st = 0; st < 32; st++) {
+            for (u = 0; u < 2; u++) {
+                w = ((st << 1) | u) & 0x3f;
+
+                out0 = 0;
+                // ANDING with generator polynomial and extracting each bit for an XOR
+                for (bit = w & 0x2b; bit; bit >>= 1) out0 ^= (bit & 1);
+                out1 = 0;
+                // ANDING with generator polynomial and extracting each bit for an XOR
+                for (bit = w & 0x3d; bit; bit >>= 1) out1 ^= (bit & 1);
+                // which position to write the entry into
+                idx = st * 2 + u;
+                sym = (out0 << 1) | out1;
+                // dividing index by four to get four separate registers 
+                EncReg[idx >> 4] |= ((e_u32)sym) << ((idx & 15) * 2);
+
+                // need to know the size of the register and whether or not we should write to one
+            }
+        }
+    return EncReg;    /* packed output table: 64 entries x 2 bits, 16 per word */
+}
+
+/*
+ * FUNC: computeMetricTable
+ *
+ * DESC: Build the hard-decision (Hamming) path-metric table for the ENCBITS
+ * (=5) PreACS warm-up stages, laid out for a hardware accelerator.
+ *
+ *   - Columns : K-1 = ENCBITS = 5   (one per warm-up trellis stage)
+ *   - Rows     : 32*2 = 64           (one per (state,input) branch, row = st*2+u)
+ *   - Entry    : accumulated Hamming distance, stored in a 10-bit field
+ *
+ * Expected output symbols come straight from computeOutputTable()'s packed
+ * buffer. For each stage the received branch word is hard-limited to a 2-bit
+ * symbol and its Hamming distance to each branch's expected output is added to
+ * the predecessor state's running total -- the same add-and-propagate PreACS
+ * does, with Hamming distance replacing the correlation metric. During warm-up
+ * the trellis grows out of state 0 with no path merging, so each reachable
+ * state has exactly one accumulated value and no compare/select is needed.
+ * Only a growing subset of branches is valid per column (2,4,8,16,32);
+ * unreached rows are left 0.
+ *
+ * EncodedStreamPtr points at the encoded packet (same input the decoder gets);
+ * the first ENCBITS words are the warm-up stages.
+ */
+/* 10-bit unsigned value. C has no native 10-bit scalar, so e_u10 is a 16-bit
+ * container holding a 10-bit range; writes are masked with & 0x3ff to enforce it. */
+typedef e_u16 e_u10;
+
+void computeMetricTable(e_s16 *EncodedStreamPtr) {
+    static e_u10 Metric[64][ENCBITS];   /* 64 rows x ENCBITS(=5) columns, 10-bit cells */
+    e_u32 *EncReg = computeOutputTable();      /* packed output symbols, 2 bits each   */
+    e_u8  recv2[ENCBITS];               /* hard-limited received symbol per warm-up stage */
+
+    // actually accumulated and already did the comparisons 
+    e_u16 acc[NUMSTATES], acc_next[NUMSTATES]; /* accumulated Hamming distance per state   */
+    n_int st, u, c, ns, r, bm, diff, active, idx, sym;
+
+
+    for (c = 0; c < ENCBITS; c++) {
+        // converting between soft encoding to hard encoding 
+        e_s16 ew = EncodedStreamPtr[c];
+        n_int f0 = (ew & 0x38) >> 3;         /* value0, bits 5-3 */
+        n_int f1 =  ew & 0x07;               /* value1, bits 2-0 */
+        n_int b0 = (f0 < 4) ? 1 : 0;         /* <4 -> strong '1', >=4 -> '0' */
+        n_int b1 = (f1 < 4) ? 1 : 0;
+        // stores the actual received bits with the hard encoding
+        recv2[c] = (e_u8)((b0 << 1) | b1);   /* 0..3 */
+    }
+
+    /* --- init: encoder starts in state 0, table cleared --------------------- */
+    // initialization
+    for (st = 0; st < NUMSTATES; st++) acc[st] = 0;
+    for (r = 0; r < 64; r++)
+	for (c = 0; c < ENCBITS; c++) Metric[r][c] = 0;
+
+    /* --- PreACS-style accumulate: add Hamming distance, propagate forward ---- */
+    active = 1;                              /* active from-states: 1,2,4,8,16 */
+    for (c = 0; c < ENCBITS; c++) {
+    // initialize next state
+	for (st = 0; st < NUMSTATES; st++) acc_next[st] = 0;
+
+	for (st = 0; st < active; st++) {
+	    for (u = 0; u < 2; u++) {
+
+            // grabbing a value from the register
+            idx = st * 2 + u;                                  /* output-table entry/row */
+            sym = (EncReg[idx >> 4] >> ((idx & 15) * 2)) & 0x3;/* expected 2-bit symbol  */
+            //0x3 masks just the lowest 2 bits which is the encoded symbol
+
+            diff = (sym ^ recv2[c]) & 0x3;                     /* differing bits  */
+            // compute distance with xor and mask
+            bm   = (diff & 1) + ((diff >> 1) & 1);             /* Hamming dist 0..2 --> converts to between 0 and 2 */
+
+            r = idx;
+            Metric[r][c] = (e_u10)((acc[st] + bm) & 0x3ff);    /* 10-bit field, 0x3ff mask keeps it to 10 bits */
+
+            ns = ((st << 1) | u) & 0x1f; //mask to 5 bits to discard the bit that shifted out
+            acc_next[ns] = Metric[r][c];
+            // no compare for some reason because its pre - ACS 
+	    }
+	}
+
+    // need to understand this last bit
+	for (st = 0; st < NUMSTATES; st++) acc[st] = acc_next[st];
+	active <<= 1;
+    }
+}

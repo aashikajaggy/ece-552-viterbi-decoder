@@ -206,11 +206,13 @@ int t_run_test( size_t iterations, int argc, const char* argv[] )
    /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
     * This is the actual benchmark
     *---------------------------------------------------------------------------*/
-
+   
    th_signal_start();  /* Tell the host that the test has begun */
 
+   // decodes the words 1000s of times 
    for ( loop_cnt = 0; loop_cnt < iterations; loop_cnt++ )  /* no stopping! */
    {
+       computeOutputTable();
        ViterbiDecoderIS136(BranchWords, DataBits);
    }
 
