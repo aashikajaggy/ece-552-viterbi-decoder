@@ -43,4 +43,23 @@
 
 void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr);
 
+/* RTL/accelerator-convention helpers (see viterb00.c). */
+unsigned int *computeOutputTable(void);
+e_u16        *computeMetricTable(e_s16 *EncodedStreamPtr);
+unsigned int *computeMetricSurvivors(void);
+
+/* Traceback over RTL-convention survivor words -> decoded words (golden layout).
+ * tracebackSurvivors() is pure (takes any survivor array); it is what both the
+ * hardware path and the software tests use. */
+void tracebackSurvivors(const unsigned int *survivors, n_int ncols,
+                        e_s16 *DecodedStreamPtr);
+
+/* Hardware ACS path (only real when built with -DUSE_HW_ACCEL; otherwise stubs).
+ *   computeACSLoop()       drive the Verilated RTL over the whole frame
+ *   getACSSurvivors()      the MAX_DATA_SIZE survivor words it produced
+ *   tracebackACSSurvivors() traceback those survivors into DecodedStreamPtr */
+void          computeACSLoop(e_s16 *EncodedStreamPtr);
+unsigned int *getACSSurvivors(void);
+void          tracebackACSSurvivors(e_s16 *DecodedStreamPtr);
+
 #endif /* __ALGO_H */

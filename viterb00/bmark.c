@@ -212,8 +212,13 @@ int t_run_test( size_t iterations, int argc, const char* argv[] )
    // decodes the words 1000s of times 
    for ( loop_cnt = 0; loop_cnt < iterations; loop_cnt++ )  /* no stopping! */
    {
-       computeOutputTable();
-       ViterbiDecoderIS136(BranchWords, DataBits);
+       /* Hardware ACS: drive the Verilated RTL over the whole frame, producing
+        * one survivor word per column (real only when built -DUSE_HW_ACCEL;
+        * computeACSLoop() builds its own output table + metric seed internally). */
+       computeACSLoop(BranchWords);
+       /* Traceback those survivor words into DataBits for the golden check. */
+       tracebackACSSurvivors(DataBits);
+       //ViterbiDecoderIS136(BranchWords, DataBits);
    }
 
    results.duration   = th_signal_finished();  /* signal that we are finished */

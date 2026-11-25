@@ -111,7 +111,8 @@ static void FindMetrics(e_s16 EncodedWord, e_s16 *pBM)
     /* Hard-limit each 3-bit soft value to one bit (0-3 -> "1", 4-7 -> "0"). */
     esBit0 = ((((EncodedWord & 0x38) >> 3) < 4) ? -1 : 1);
     esBit1 = (((EncodedWord & 0x7) < 4) ? -1 : 1);
-
+    // how well the received word matches an expected symbol --> all possible combinations
+    // essentially a dot product between the expected and received symbols
     esPp =  esBit0 + esBit1;
     esPm =  esBit0 - esBit1;
     esMm = -esBit0 - esBit1;
@@ -119,6 +120,8 @@ static void FindMetrics(e_s16 EncodedWord, e_s16 *pBM)
 
     /* Populate the branch metrics table */
     // one slot per ACS butterfly 
+    // 16 slots in a butterfly, 32 states, 2 predecessors 2 current, 64 branches
+    // 2 symbols but one magnitude
     *pBM++ = esMm;
     *pBM++ = esPm;
     *pBM++ = esMp;
@@ -150,22 +153,30 @@ static void PreACS(n_int Iterations, e_s16 *pBranchMetric)
 {
     n_int i;
     e_s16 esMetricIn, esMetric1, esMetric2;
-
+    // current stage
     StatePathMetricData *pIn1 = BufPtr[BufSelector];
+    // next stage - holds the accumulated distance and the survivor bits that got it there 
     StatePathMetricData *pOut = BufPtr[1 - BufSelector];
-
+    // decides if we read from SPM1 or SPM2
+    // SPM1 and SPM2 are capture of the entire state at a certain point in time
     BufSelector ^= 1;		/* Toggle for next call */
 
     for (i = 0; i < Iterations; i++) {
+    // literally hamming distances
 	esMetricIn = *pBranchMetric++;
-
+    // plus and minus reflects the complementary inputs from the branch metric table 
+    // input 0
 	esMetric1 = pIn1->m_esPathMetric - esMetricIn;
+    // input 1
 	esMetric2 = pIn1->m_esPathMetric + esMetricIn;
-
+    // child via input 0 --> path metric
 	pOut->m_esPathMetric = esMetric1;
+    // append bit 0
 	pOut->m_esState = (pIn1->m_esState << 1);
+    //append pOut to next value
 	pOut++;
 	pOut->m_esPathMetric = esMetric2;
+    // append bit 1
 	pOut->m_esState = (pIn1->m_esState << 1)|1;
 	pOut++;
 	pIn1++;
@@ -299,7 +310,8 @@ void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr)
     e_s16 *PathPtr = pSavedPath;
 
     /* Initialize the state path metric buffers */
-
+    // path metric per state 
+    // SPM1 and SPM2 are two state buffers - current and next 
     BufSelector = 0;			/* Start by reading from SPM1[] */
     SPM1[0].m_esPathMetric = 0x0ff;		/* Give state 0 higher metric */
     for (i = 1; i < NUMSTATES; i++) {
@@ -308,7 +320,10 @@ void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr)
 
     iter = 1;
     for (i = 0; i < ENCBITS; i++) {
+    //populate branch metric array
 	FindMetrics(*EncodedStreamPtr++, pBranchMetrics);
+
+    // every iteration we have double the number of branches
 	PreACS(iter, pBranchMetrics);
 	iter *= 2;
     }
@@ -332,115 +347,258 @@ void ViterbiDecoderIS136(e_s16 *EncodedStreamPtr, e_s16 *DecodedStreamPtr)
     TraceBack(DecodedStreamPtr, PathPtr);
 } /* ViterbiDecoderIS136 */
 
-e_u32 *computeOutputTable() {
-    static e_u32 EncReg[4] = { 0, 0, 0, 0 };
-        n_int st, u, w, bit, out0, out1, idx, sym;
+/* reduction XOR (parity) of x */
+static n_int otab_parity(unsigned x) { n_int p = 0; while (x) { p ^= (x & 1); x >>= 1; } return p; }
 
-        for (st = 0; st < 32; st++) {
-            for (u = 0; u < 2; u++) {
-                w = ((st << 1) | u) & 0x3f;
+/*
+ * FUNC: computeOutputTable
+ *
+ * Build the K=6 rate-1/2 output table in the RTL/accelerator convention
+ * (see rtl/viterbi_accelerator.sv and tb/tb_viterbi.sv):
+ *
+ *   - register value = { input(bit5), state(bits4:0) }   (input at the MSB)
+ *   - entry index  = (input << 5) | state      (0..63)
+ *   - bit 2*entry   = o0 output (symbol bit0)
+ *   - bit 2*entry+1 = o1 output (symbol bit1)
+ *
+ * GENERATORS: the EEMBC encoder uses octal 53/75 with its register in the
+ * OPPOSITE bit order -- (state<<1)|input, input at the LSB. The RTL register
+ * (input<<5)|state is the 6-bit reverse of that, and
+ *   parity(reg_rtl & reverse6(M)) == parity(reg_eembc & M),
+ * so to decode the EEMBC code on this register we apply the bit-reversed
+ * generators:  053(101011) -> 065(110101),  075(111101) -> 057(101111).
+ * (Using 053/075 here would decode the reciprocal code, which only matches the
+ * benchmark for all-zeros -- see test/traceback_check.c and the hamming goldens.)
+ *
+ * Returned as a 128-bit table packed into 4 x 32-bit words, in the exact bit
+ * order the accelerator reads from output_table[127:0] (table_q[entry*2 +: 2]).
+ * The storage is static; it is overwritten by the next call and must not be freed.
+ */
+unsigned int *computeOutputTable(void) {
+    static unsigned int table[4];
+    n_int u, p, reg, out0, out1, e, b0, b1;
 
-                out0 = 0;
-                // ANDING with generator polynomial and extracting each bit for an XOR
-                for (bit = w & 0x2b; bit; bit >>= 1) out0 ^= (bit & 1);
-                out1 = 0;
-                // ANDING with generator polynomial and extracting each bit for an XOR
-                for (bit = w & 0x3d; bit; bit >>= 1) out1 ^= (bit & 1);
-                // which position to write the entry into
-                idx = st * 2 + u;
-                sym = (out0 << 1) | out1;
-                // dividing index by four to get four separate registers 
-                EncReg[idx >> 4] |= ((e_u32)sym) << ((idx & 15) * 2);
-
-                // need to know the size of the register and whether or not we should write to one
-            }
+    table[0] = table[1] = table[2] = table[3] = 0;
+    for (u = 0; u < 2; u++) {
+        for (p = 0; p < 32; p++) {
+            reg  = (u << 5) | p;              /* register: input at bit5, state in bits4:0 */
+            out0 = otab_parity(reg & 065);    /* EEMBC gen 053, bit-reversed for this reg order */
+            out1 = otab_parity(reg & 057);    /* EEMBC gen 075, bit-reversed for this reg order */
+            e  = (u << 5) | p;                /* entry index 0..63 */
+            b0 = 2 * e;                       /* o53 output bit position */
+            b1 = 2 * e + 1;                   /* o75 output bit position */
+            if (out0) table[b0 >> 5] |= 1u << (b0 & 31);
+            if (out1) table[b1 >> 5] |= 1u << (b1 & 31);
         }
-    return EncReg;    /* packed output table: 64 entries x 2 bits, 16 per word */
+    }
+    return table;    /* 128-bit packed output table, RTL convention */
 }
+
+/* 16-bit saturating "infinity" metric, matching the RTL (METRIC_WIDTH=16, INF=all-ones). */
+#define HW_METRIC_INF  0xFFFFu
+
+/* Read the 2-bit expected symbol at `entry` (0..63) from the RTL-convention
+ * 4x32 packed table: bit 2*entry = o53 (symbol bit0), 2*entry+1 = o75 (bit1). */
+static n_int table_symbol(const unsigned int *t, n_int entry) {
+    n_int b = entry * 2;
+    return (t[b >> 5] >> (b & 31)) & 0x3;
+}
+
+/* Hamming distance between two 2-bit symbols. */
+static n_int hamming2(n_int a, n_int b) {
+    n_int x = a ^ b;
+    return (x & 1) + ((x >> 1) & 1);
+}
+
+/* Per-column survivor words, one bit per destination state (RTL numbering). */
+static unsigned int g_survivors[ENCBITS];
+unsigned int *computeMetricSurvivors(void) { return g_survivors; }
 
 /*
  * FUNC: computeMetricTable
  *
- * DESC: Build the hard-decision (Hamming) path-metric table for the ENCBITS
- * (=5) PreACS warm-up stages, laid out for a hardware accelerator.
+ * DESC: Software mirror of the hardware ACS (rtl/viterbi_accelerator.sv). For
+ * each of the first ENCBITS received symbols it performs one destination-centric
+ * Add-Compare-Select column, using the RTL-convention output table and the same
+ * trellis wiring the accelerator uses:
  *
- *   - Columns : K-1 = ENCBITS = 5   (one per warm-up trellis stage)
- *   - Rows     : 32*2 = 64           (one per (state,input) branch, row = st*2+u)
- *   - Entry    : accumulated Hamming distance, stored in a 10-bit field
+ *   destination d (0..31):
+ *     input  = d >> 4                         (bit shifted in at the top)
+ *     pred_a = ((d & 0xf) << 1) | 0           (the two predecessors differ in
+ *     pred_b = ((d & 0xf) << 1) | 1            the input bit)
+ *     entry  = (input << 5) | predecessor     (index into the output table)
+ *     metric = min( acc[pred_a] + hamming(sym_a, recv),
+ *                   acc[pred_b] + hamming(sym_b, recv) )   -- INF saturating
+ *     survivor bit d = (cost_b < cost_a)      (ties choose predecessor A)
  *
- * Expected output symbols come straight from computeOutputTable()'s packed
- * buffer. For each stage the received branch word is hard-limited to a 2-bit
- * symbol and its Hamming distance to each branch's expected output is added to
- * the predecessor state's running total -- the same add-and-propagate PreACS
- * does, with Hamming distance replacing the correlation metric. During warm-up
- * the trellis grows out of state 0 with no path merging, so each reachable
- * state has exactly one accumulated value and no compare/select is needed.
- * Only a growing subset of branches is valid per column (2,4,8,16,32);
- * unreached rows are left 0.
+ * State 0 is seeded to metric 0 (known encoder start), all others to INF
+ * (unreachable), so no explicit warm-up ramp is needed -- INF predecessors can
+ * never win. This matches the accelerator exactly, so the returned metrics and
+ * the per-column survivor words (see computeMetricSurvivors()) can be diffed
+ * against the hardware's metrics[]/survivors[] for verification.
  *
- * EncodedStreamPtr points at the encoded packet (same input the decoder gets);
- * the first ENCBITS words are the warm-up stages.
+ * To model the full frame instead of the warm-up window, change the column
+ * count from ENCBITS to MAX_DATA_SIZE (and size g_survivors to match).
+ *
+ * RETURNS: pointer to a static NUMSTATES-entry array of the final per-state
+ * path metrics (RTL state numbering). Static storage: overwritten by the next
+ * call, must not be freed.
  */
-/* 10-bit unsigned value. C has no native 10-bit scalar, so e_u10 is a 16-bit
- * container holding a 10-bit range; writes are masked with & 0x3ff to enforce it. */
-typedef e_u16 e_u10;
+e_u16 *computeMetricTable(e_s16 *EncodedStreamPtr) {
+    unsigned int *table = computeOutputTable();   /* RTL-convention output table */
+    static e_u16 acc[NUMSTATES];                  /* path metric per state (returned)    */
+    e_u16 acc_next[NUMSTATES];                    /* next-column scratch                  */
+    n_int c, d;
 
-void computeMetricTable(e_s16 *EncodedStreamPtr) {
-    static e_u10 Metric[64][ENCBITS];   /* 64 rows x ENCBITS(=5) columns, 10-bit cells */
-    e_u32 *EncReg = computeOutputTable();      /* packed output symbols, 2 bits each   */
-    e_u8  recv2[ENCBITS];               /* hard-limited received symbol per warm-up stage */
-
-    // actually accumulated and already did the comparisons 
-    e_u16 acc[NUMSTATES], acc_next[NUMSTATES]; /* accumulated Hamming distance per state   */
-    n_int st, u, c, ns, r, bm, diff, active, idx, sym;
-
+    /* init: encoder starts in state 0 -> metric 0; all others unreachable (INF). */
+    for (d = 0; d < NUMSTATES; d++) acc[d] = (e_u16)((d == 0) ? 0 : HW_METRIC_INF);
 
     for (c = 0; c < ENCBITS; c++) {
-        // converting between soft encoding to hard encoding 
+        /* hard-decision received symbol in RTL bit order:
+         * bit0 = o53 channel (soft bits 5-3), bit1 = o75 channel (soft bits 2-0). */
         e_s16 ew = EncodedStreamPtr[c];
-        n_int f0 = (ew & 0x38) >> 3;         /* value0, bits 5-3 */
-        n_int f1 =  ew & 0x07;               /* value1, bits 2-0 */
-        n_int b0 = (f0 < 4) ? 1 : 0;         /* <4 -> strong '1', >=4 -> '0' */
-        n_int b1 = (f1 < 4) ? 1 : 0;
-        // stores the actual received bits with the hard encoding
-        recv2[c] = (e_u8)((b0 << 1) | b1);   /* 0..3 */
+        n_int b0 = (((ew & 0x38) >> 3) < 4) ? 1 : 0;   /* o53 channel */
+        n_int b1 = ( (ew & 0x07)       < 4) ? 1 : 0;   /* o75 channel */
+        n_int recv = (b1 << 1) | b0;
+        unsigned int surv = 0;
+
+        for (d = 0; d < NUMSTATES; d++) {
+            n_int input = (d >> 4) & 1;
+            n_int pa = ((d & 0xf) << 1) | 0;
+            n_int pb = ((d & 0xf) << 1) | 1;
+            n_int ea = table_symbol(table, (input << 5) | pa);
+            n_int eb = table_symbol(table, (input << 5) | pb);
+
+            /* INF predecessors sort above every finite sum (extended compare). */
+            unsigned ca = (acc[pa] == HW_METRIC_INF) ? 0x1FFFFu
+                        : (unsigned)acc[pa] + (unsigned)hamming2(ea, recv);
+            unsigned cb = (acc[pb] == HW_METRIC_INF) ? 0x1FFFFu
+                        : (unsigned)acc[pb] + (unsigned)hamming2(eb, recv);
+            n_int sv = (cb < ca) ? 1 : 0;              /* ties -> predecessor A */
+            unsigned chosen = sv ? cb : ca;
+
+            acc_next[d] = (e_u16)((chosen >= HW_METRIC_INF) ? HW_METRIC_INF : chosen);
+            surv |= (unsigned)sv << d;
+        }
+
+        for (d = 0; d < NUMSTATES; d++) acc[d] = acc_next[d];
+        g_survivors[c] = surv;
     }
 
-    /* --- init: encoder starts in state 0, table cleared --------------------- */
-    // initialization
-    for (st = 0; st < NUMSTATES; st++) acc[st] = 0;
-    for (r = 0; r < 64; r++)
-	for (c = 0; c < ENCBITS; c++) Metric[r][c] = 0;
+    return acc;    /* final per-state path metrics, RTL state numbering */
+}
 
-    /* --- PreACS-style accumulate: add Hamming distance, propagate forward ---- */
-    active = 1;                              /* active from-states: 1,2,4,8,16 */
-    for (c = 0; c < ENCBITS; c++) {
-    // initialize next state
-	for (st = 0; st < NUMSTATES; st++) acc_next[st] = 0;
+/*
+ * FUNC: tracebackSurvivors
+ *
+ * DESC: Standard survivor-memory traceback over the RTL/accelerator survivor
+ * words. survivors[c] bit s is the ACS decision for destination state s at
+ * column c: 0 -> predecessor {s[3:0],0}, 1 -> predecessor {s[3:0],1}. This is
+ * exactly what the hardware's survivors[] / getACSSurvivors() produces.
+ *
+ * The trellis wiring is the RTL convention  dst = (src >> 1) | (bit << 4), so:
+ *   - the information bit decoded on arrival at state d is  d >> 4  (its MSB);
+ *   - a state's two predecessors differ only in their low bit, which the
+ *     survivor bit supplies:  predecessor = ((d & 0xf) << 1) | survivor_bit.
+ *
+ * The encoder is flushed to state 0, so traceback starts at state 0 and walks
+ * backward recovering one info bit per column. The 'ncols' bits are packed
+ * MSB-first into bytes, two bytes per output word with the earlier byte in the
+ * high half -- the same layout ViterbiDecoderIS136()/the golden data use, so a
+ * decoded buffer can be compared word-for-word against the goldens.
+ */
+#ifndef TB_MSB_FIRST
+#define TB_MSB_FIRST 1          /* 1: first decoded bit is a byte's MSB (ASCII) */
+#endif
+void tracebackSurvivors(const unsigned int *survivors, n_int ncols,
+                        e_s16 *DecodedStreamPtr) {
+    static unsigned char bits[MAX_DATA_SIZE];
+    n_int state = 0, c, i, nbytes, nwords;
 
-	for (st = 0; st < active; st++) {
-	    for (u = 0; u < 2; u++) {
+    /* 1) recover the info bits, latest column first, into forward time order. */
+    for (c = ncols - 1; c >= 0; c--) {
+        n_int sbit;
+        bits[c] = (unsigned char)((state >> 4) & 1);     /* info bit into 'state' */
+        sbit    = (n_int)((survivors[c] >> state) & 1u); /* chosen predecessor    */
+        state   = ((state & 0xf) << 1) | sbit;           /* step to predecessor   */
+    }
 
-            // grabbing a value from the register
-            idx = st * 2 + u;                                  /* output-table entry/row */
-            sym = (EncReg[idx >> 4] >> ((idx & 15) * 2)) & 0x3;/* expected 2-bit symbol  */
-            //0x3 masks just the lowest 2 bits which is the encoded symbol
-
-            diff = (sym ^ recv2[c]) & 0x3;                     /* differing bits  */
-            // compute distance with xor and mask
-            bm   = (diff & 1) + ((diff >> 1) & 1);             /* Hamming dist 0..2 --> converts to between 0 and 2 */
-
-            r = idx;
-            Metric[r][c] = (e_u10)((acc[st] + bm) & 0x3ff);    /* 10-bit field, 0x3ff mask keeps it to 10 bits */
-
-            ns = ((st << 1) | u) & 0x1f; //mask to 5 bits to discard the bit that shifted out
-            acc_next[ns] = Metric[r][c];
-            // no compare for some reason because its pre - ACS 
-	    }
-	}
-
-    // need to understand this last bit
-	for (st = 0; st < NUMSTATES; st++) acc[st] = acc_next[st];
-	active <<= 1;
+    /* 2) pack into golden layout: 8 bits/byte, 2 bytes/word (high byte first). */
+    nbytes = (ncols + 7) / 8;
+    nwords = ncols / 16 + 1;
+    for (i = 0; i < nwords; i++) DecodedStreamPtr[i] = 0;
+    for (i = 0; i < nbytes; i++) {
+        n_int b, val = 0;
+        for (b = 0; b < 8; b++) {
+            n_int idx = i * 8 + b;
+            n_int bit = (idx < ncols) ? bits[idx] : 0;
+#if TB_MSB_FIRST
+            val = (val << 1) | bit;                      /* bit at i*8 -> MSB */
+#else
+            val |= bit << b;                             /* bit at i*8 -> LSB */
+#endif
+        }
+        if ((i & 1) == 0) DecodedStreamPtr[i >> 1]  = (e_s16)((val & 0xff) << 8);
+        else              DecodedStreamPtr[i >> 1] |= (e_s16)( val & 0xff);
     }
 }
+
+/*
+ * FUNC: computeACSLoop
+ *
+ * Drive the Verilator-compiled viterbi_accelerator across a whole frame: one
+ * hardware ACS column per received symbol (MAX_DATA_SIZE = 344 stages). Each
+ * column returns a 32-bit survivor word (one bit per destination state), stored
+ * in g_acs_survivors[] for the traceback.
+ *
+ * Build with -DUSE_HW_ACCEL and link hw_driver.cpp + the Verilated model
+ * (obj_dir/Vviterbi_accelerator__ALL.a + verilated.o). Without the macro this
+ * is a no-op stub so the pure-software build keeps linking.
+ */
+#ifdef USE_HW_ACCEL
+#include "hw_driver.h"
+
+/* hard-decision 2-bit received symbol in RTL bit order:
+ * bit0 = o53 channel (soft bits 5-3), bit1 = o75 channel (soft bits 2-0). */
+static unsigned char hard_symbol(e_s16 ew) {
+    n_int b0 = (((ew & 0x38) >> 3) < 4) ? 1 : 0;   /* o53 channel */
+    n_int b1 = ( (ew & 0x07)       < 4) ? 1 : 0;   /* o75 channel */
+    return (unsigned char)((b1 << 1) | b0);
+}
+
+/* Per-stage survivor words from the hardware ACS, for traceback. */
+static unsigned int g_acs_survivors[MAX_DATA_SIZE];
+unsigned int *getACSSurvivors(void) { return g_acs_survivors; }
+
+void computeACSLoop(e_s16 *EncodedStreamPtr) {
+    unsigned int *otable = computeOutputTable();   /* RTL-convention output table */
+    unsigned int seed[NUMSTATES];                  /* starting metric column       */
+    n_int s;
+
+    /* Initial metric column: the encoder starts in state 0, so state 0 has
+     * metric 0 and every other state is unreachable (INF). This is exactly the
+     * column computeMetricTable() initializes 'acc' to before its first stage. */
+    for (s = 0; s < NUMSTATES; s++)
+        seed[s] = (s == 0) ? 0u : (unsigned int)HW_METRIC_INF;
+
+    hw_init();                     /* construct + reset the model (idempotent)     */
+    hw_init_frame(seed, otable);   /* load_context: seed metrics + output table    */
+
+    for (s = 0; s < MAX_DATA_SIZE; s++)            /* the 344-stage ACS loop       */
+        // each entry in the array is 344 bits
+        g_acs_survivors[s] = hw_run_column(hard_symbol(EncodedStreamPtr[s]));
+
+    /* Model stays alive for the next frame (hw_init is idempotent, hw_init_frame
+     * re-seeds). Caller runs hw_final() once when completely done. */
+}
+
+/* Traceback the survivor words the hardware just produced into DecodedStreamPtr
+ * (golden layout). Call after computeACSLoop() for the same frame. */
+void tracebackACSSurvivors(e_s16 *DecodedStreamPtr) {
+    tracebackSurvivors(g_acs_survivors, MAX_DATA_SIZE, DecodedStreamPtr);
+}
+#else
+void computeACSLoop(e_s16 *EncodedStreamPtr) { (void)EncodedStreamPtr; /* HW accelerator not built */ }
+unsigned int *getACSSurvivors(void) { return 0; /* HW accelerator not built */ }
+void tracebackACSSurvivors(e_s16 *DecodedStreamPtr) { (void)DecodedStreamPtr; /* HW accelerator not built */ }
+#endif
