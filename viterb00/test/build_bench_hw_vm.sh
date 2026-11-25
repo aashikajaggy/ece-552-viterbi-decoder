@@ -28,7 +28,7 @@ OBJDIR="$TESTDIR/obj_dir"
 BUILD="$TESTDIR/build"
 DATA="${1:-1}"
 
-# --- prerequisites ----------------------------------------------------------
+# the computer environment must have Verilator set up as part of the path
 for d in "$THLITE/src" "$THLITE/x86/al" "$TELECOM"; do
     [ -d "$d" ] || { echo "ERROR: missing harness tree: $d" >&2;
                      echo "       (see FILES NEEDED ON THE VM at the end of this script)" >&2; exit 1; }
@@ -47,11 +47,17 @@ echo "th_lite        : $THLITE"
 echo "telecom        : $TELECOM"
 
 # --- 1. verilate the RTL ----------------------------------------------------
-echo "== [1/4] verilating RTL =="
-verilator --cc --build \
-    "$RTLDIR/viterbi_accelerator.sv" "$RTLDIR/viterbi_controller.sv" \
-    "$RTLDIR/viterbi_metric_store.sv" "$RTLDIR/viterbi_acs.sv" "$RTLDIR/hamming2.sv" \
-    --top-module viterbi_accelerator --Mdir "$OBJDIR"
+# Only (re)verilate if the compiled model is missing. Delete "$OBJDIR" (or run
+# a clean) to force regeneration after editing the .sv sources.
+if [ -f "$OBJDIR/Vviterbi_accelerator__ALL.a" ] || [ -f "$OBJDIR/Vviterbi_accelerator__ALL.o" ]; then
+    echo "== [1/4] RTL already verilated ($OBJDIR) -- skipping; rm -rf it to force a rebuild =="
+else
+    echo "== [1/4] verilating RTL =="
+    verilator --cc --build \
+        "$RTLDIR/viterbi_accelerator.sv" "$RTLDIR/viterbi_controller.sv" \
+        "$RTLDIR/viterbi_metric_store.sv" "$RTLDIR/viterbi_acs.sv" "$RTLDIR/hamming2.sv" \
+        --top-module viterbi_accelerator --Mdir "$OBJDIR"
+fi
 
 # --- 2. compile C: benchmark + decoder + th_lite harness --------------------
 echo "== [2/4] compiling C (benchmark + th_lite harness, -DUSE_HW_ACCEL -DDATA_$DATA) =="
@@ -77,12 +83,14 @@ MODEL="$OBJDIR/Vviterbi_accelerator__ALL.a"
 [ -f "$MODEL" ] || MODEL="$OBJDIR/Vviterbi_accelerator__ALL.o"
 
 # --- 4. link (g++ + -pthread) and run ---------------------------------------
+# bmark_lite.c is the main entry point for the tests
 echo "== [4/4] linking viterbi_bench_hw =="
 $CXX -O2 $CXXSTD -pthread -o "$BUILD/viterbi_bench_hw" \
     "$BUILD/bmark_lite.o" "$BUILD/viterb00.o" \
     "$BUILD/thlib.o" "$BUILD/crc.o" "$BUILD/heap.o" "$BUILD/thal.o" \
     "$BUILD/hw_driver.o" "${RT_OBJS[@]}" "$MODEL"
 
+# single executable with all of the files 
 echo "== running EEMBC harness over the RTL (DATA_$DATA) =="
 "$BUILD/viterbi_bench_hw"
 

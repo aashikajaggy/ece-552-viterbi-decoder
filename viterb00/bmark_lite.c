@@ -182,6 +182,7 @@ int t_run_test( TCDef *tcdef,int argc, const char *argv[] )
 
    for ( loop_cnt = 0; loop_cnt < tcdef->rec_iterations ; loop_cnt++ )  /* no stopping! */
    {
+/* a compile-time flag */
 #ifdef USE_HW_ACCEL
        computeACSLoop(BranchWords);      /* drive the Verilator RTL over the frame */
        tracebackACSSurvivors(DataBits);  /* survivor words -> decoded output        */

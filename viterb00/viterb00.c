@@ -381,12 +381,13 @@ unsigned int *computeOutputTable(void) {
     table[0] = table[1] = table[2] = table[3] = 0;
     for (u = 0; u < 2; u++) {
         for (p = 0; p < 32; p++) {
-            reg  = (u << 5) | p;              /* register: input at bit5, state in bits4:0 */
-            out0 = otab_parity(reg & 065);    /* EEMBC gen 053, bit-reversed for this reg order */
-            out1 = otab_parity(reg & 057);    /* EEMBC gen 075, bit-reversed for this reg order */
+            reg  = (u << 5) | p;              /* Shift in the input into bit 5, and then remaining bits are the state bits */
+            out0 = otab_parity(reg & 065);    /* ANDing with the generator polynomial and then applying XOR - 065 */
+            out1 = otab_parity(reg & 057);    /* ANDing with the generator polynomial and then applying XOR - 057 */
             e  = (u << 5) | p;                /* entry index 0..63 */
             b0 = 2 * e;                       /* o53 output bit position */
             b1 = 2 * e + 1;                   /* o75 output bit position */
+            // writes the output bits into the correct position of the register
             if (out0) table[b0 >> 5] |= 1u << (b0 & 31);
             if (out1) table[b1 >> 5] |= 1u << (b1 & 31);
         }
@@ -463,13 +464,16 @@ e_u16 *computeMetricTable(e_s16 *EncodedStreamPtr) {
         unsigned int surv = 0;
 
         for (d = 0; d < NUMSTATES; d++) {
+            /* applying the output table */
             n_int input = (d >> 4) & 1;
             n_int pa = ((d & 0xf) << 1) | 0;
             n_int pb = ((d & 0xf) << 1) | 1;
+            /* read outputs from the output table for two inputs */
             n_int ea = table_symbol(table, (input << 5) | pa);
             n_int eb = table_symbol(table, (input << 5) | pb);
 
             /* INF predecessors sort above every finite sum (extended compare). */
+            /* comparison to infinity */
             unsigned ca = (acc[pa] == HW_METRIC_INF) ? 0x1FFFFu
                         : (unsigned)acc[pa] + (unsigned)hamming2(ea, recv);
             unsigned cb = (acc[pb] == HW_METRIC_INF) ? 0x1FFFFu
@@ -516,11 +520,14 @@ void tracebackSurvivors(const unsigned int *survivors, n_int ncols,
     n_int state = 0, c, i, nbytes, nwords;
 
     /* 1) recover the info bits, latest column first, into forward time order. */
+    /* starting in reverse order through the columns */
     for (c = ncols - 1; c >= 0; c--) {
         n_int sbit;
-        bits[c] = (unsigned char)((state >> 4) & 1);     /* info bit into 'state' */
+        bits[c] = (unsigned char)((state >> 4) & 1);     /* extract the MSB */
         sbit    = (n_int)((survivors[c] >> state) & 1u); /* chosen predecessor    */
         state   = ((state & 0xf) << 1) | sbit;           /* step to predecessor   */
+        /* we 0xf because the MSB corresponds with the current bit */
+        /* we tag along the survivor bit here for state */
     }
 
     /* 2) pack into golden layout: 8 bits/byte, 2 bytes/word (high byte first). */

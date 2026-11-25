@@ -1,29 +1,45 @@
-Standalone correctness test for ViterbiDecoderIS136
-===================================================
+EEMBC harness over the Verilator RTL (VM harness test)
+======================================================
 
-Checks the decoder against all four shipped datasets (zeros, ones, gett,
-toggle) without building the full EEMBC test harness. For each dataset it
-compares every decoded word to the golden output, prints the th_lite CRC16
-(so a pass here implies a pass under the harness NON_INTRUSIVE_CRC_CHECK),
-and shows the decoded text. Exit code is 0 if all pass, 1 otherwise.
+Runs the real EEMBC th_lite benchmark (bmark_lite.c: timing + per-word golden
+check + CRC-vs-EXPECTED_CRC) with the decode loop driven by the Verilator
+viterbi_accelerator RTL instead of the software decoder (built with
+-DUSE_HW_ACCEL). This is the only test path kept here: the EEMBC harness
+scoring hardware-produced output.
 
-Run (from the viterb00/ directory):
+Requires Verilator, so run it on the VM where Verilator is installed.
 
-    make -C test check
+Run (from this directory):
 
-or from this directory:
+    ./build_bench_hw_vm.sh [DATA]
 
-    make check
+      DATA  dataset: 1 = gett (default)  2 = toggle  3 = ones  4 = zeros
 
-Files:
-    selftest.c    the test driver (includes ../viterb00.c and ../datasets/*)
-    makefile      builds selftest against ../viterb00.c
-    stub/thlib.h  minimal type typedefs so the harness is not needed
+e.g. all four:
+
+    ./build_bench_hw_vm.sh 1
+    ./build_bench_hw_vm.sh 2
+    ./build_bench_hw_vm.sh 3
+    ./build_bench_hw_vm.sh 4
+
+Each run prints the harness verdict (DONE / Failure) and the CRC. A pass means
+the CRC matches EXPECTED_CRC in bmark_lite.c:
+    gett   0x79f0   toggle 0x096a   ones 0x48bf   zeros 0x0000
+gett/toggle are checked against the *_golden_hamming.dat references (the
+hard-decision Hamming output the RTL produces); ones/zeros use the stock
+goldens.
+
+What the script does (see the header comment in build_bench_hw_vm.sh for the
+full file list needed on the VM):
+    [1] verilate the RTL  ->  obj_dir/Vviterbi_accelerator__ALL.a
+                              (skipped if already built; rm -rf obj_dir to force)
+    [2] compile the benchmark + th_lite harness C sources
+    [3] compile hw_driver.cpp + collect the Verilator runtime
+    [4] link (g++ -pthread) -> build/viterbi_bench_hw, then run it
 
 Notes:
-  - Only gcc/cc is required; no harness, no platform AL layer.
-  - This tests correctness, not performance. Timing/throughput still comes
-    from the normal EEMBC build (make in the telecom/ directory).
-  - If you change the branch metric in viterb00.c (e.g. to Hamming distance),
-    the gett and toggle goldens will no longer match unless you regenerate
-    them; zeros and ones pass under any sane metric.
+  - th_lite/ and telecom/ live OUTSIDE this git repo, so they are not pulled in
+    by cloning it; they must be present on the VM (the script checks and the
+    header comment lists exactly which files).
+  - Build artifacts land in build/ and obj_dir/ under this directory; nothing
+    is written back into the th_lite/ or telecom/ trees.
